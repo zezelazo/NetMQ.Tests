@@ -1,11 +1,10 @@
 ﻿using NetMQ;
 using NetMQ.Sockets;
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Security.Cryptography.X509Certificates; 
+using NetMQ.Security.V0_1;
 
 namespace Server
 {
@@ -14,36 +13,51 @@ namespace Server
         
         static void Main(string[] args)
         {
-            var cInput = "";
-            using (var server = new RouterSocket("@tcp://127.0.0.1:5599")) 
-            using (var poller = new NetMQPoller())
+            using (var socket = new DealerSocket())
             {
-                poller.Add(server);
-                server.ReceiveReady += Server_ReceiveReady;    
-                poller.RunAsync();                    
-                while (cInput.ToLower() != "x")
-                {          
-                    cInput = Console.ReadLine();
+                socket.Bind("tcp://*:5556");
+
+                SecureChannel secureChannel = new SecureChannel(ConnectionEnd.Server);
+
+                // we need to set X509Certificate with a private key for the server
+                X509Certificate2 certificate = new X509Certificate2("ia.pfx", "1234");
+                secureChannel.Certificate = certificate;
+
+                IList<NetMQMessage> outgoingMessages = new List<NetMQMessage>();
+
+                // waiting for message from client
+                NetMQMessage incomingMessage = socket.ReceiveMultipartMessage();
+
+                // calling ProcessMessage until ProcessMessage return true 
+                // and the SecureChannel is ready to encrypt and decrypt messages
+                while (!secureChannel.ProcessMessage(incomingMessage, outgoingMessages))
+                {
+                    foreach (NetMQMessage outgoingMessage in outgoingMessages)
+                    {
+                        socket.SendMultipartMessage(outgoingMessage);
+                    }
+                    outgoingMessages.Clear();
+
+                    incomingMessage = socket.ReceiveMultipartMessage();
                 }
-                poller.StopAsync();
+                foreach (NetMQMessage outgoingMessage in outgoingMessages)
+                {
+                    socket.SendMultipartMessage(outgoingMessage);
+                }
+                outgoingMessages.Clear();
+
+                // this message is now encrypted
+                NetMQMessage cipherMessage = socket.ReceiveMultipartMessage();
+
+                // decrypting the message
+                NetMQMessage plainMessage = secureChannel.DecryptApplicationMessage(cipherMessage);
+                Console.WriteLine(plainMessage.First.ConvertToString());
+                Console.ReadLine();
             }
-            
+
         }
 
-        private static void Server_ReceiveReady(object sender, NetMQSocketEventArgs e)
-        {
-            var msg = e.Socket.ReceiveMultipartMessage();
-            Console.WriteLine("======================================");
-            Console.WriteLine($"New MSG from {msg[0].ConvertToString()}");
-            Console.WriteLine($" Recived at  {DateTime.Now}");
-            Console.WriteLine($" With Content {msg[2].ConvertToString()}");
-            Thread.Sleep(5000);
-            var messageToClient = new NetMQMessage();
-            messageToClient.Append(msg[0].ConvertToString());
-            messageToClient.AppendEmptyFrame();
-            messageToClient.Append(DateTime.Now.ToString());
-            e.Socket.SendMultipartMessage(messageToClient);
-        }
+        
     }
 }
 
